@@ -1,4 +1,5 @@
 import os
+import json
 import numpy as np
 from torch.utils.data import Dataset
 from glob import glob
@@ -633,6 +634,38 @@ class FallingThings(StereoDataset):
             self.samples.append(sample)
 
 
+class CloudStereo(StereoDataset):
+    def __init__(self,
+                 data_dir='datasets/cloud-stereo',
+                 split_files=('train.json',),
+                 transform=None,
+                 ):
+        super(CloudStereo, self).__init__(transform=transform, is_raw_disp_png=True)
+
+        if isinstance(split_files, str):
+            split_files = [split_files]
+
+        for split_file in split_files:
+            split_path = split_file if os.path.isabs(split_file) else os.path.join(data_dir, split_file)
+
+            if not os.path.exists(split_path):
+                raise FileNotFoundError('Missing Cloud Stereo split file: %s' % split_path)
+
+            with open(split_path, 'r') as fp:
+                metadata = json.load(fp)
+
+            frames = metadata.get('frames', [])
+            split_root = os.path.dirname(split_path)
+
+            for frame in frames:
+                sample = dict()
+                sample['left'] = os.path.join(split_root, frame['left_image_path'])
+                sample['right'] = os.path.join(split_root, frame['right_image_path'])
+                sample['disp'] = os.path.join(split_root, frame['disparity_path'])
+
+                self.samples.append(sample)
+
+
 def build_dataset(args):
     if args.stage == 'sceneflow':
         train_transform_list = [transforms.RandomScale(crop_width=args.img_width),
@@ -665,6 +698,25 @@ def build_dataset(args):
         train_transform = transforms.Compose(train_transform_list)
 
         train_dataset = VKITTI2(transform=train_transform)
+
+        return train_dataset
+
+    elif args.stage == 'cloud_stereo':
+        train_transform_list = [transforms.RandomScale(crop_width=args.img_width),
+                                transforms.RandomCrop(args.img_height, args.img_width),
+                                transforms.RandomColor(),
+                                transforms.RandomVerticalFlip(),
+                                transforms.ToTensor(),
+                                transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD)
+                                ]
+
+        train_transform = transforms.Compose(train_transform_list)
+
+        cloud_stereo = CloudStereo(data_dir=args.cloudstereo_root,
+                                   split_files=args.cloudstereo_train_json,
+                                   transform=train_transform)
+
+        train_dataset = max(1, args.cloudstereo_repeat) * cloud_stereo
 
         return train_dataset
 
