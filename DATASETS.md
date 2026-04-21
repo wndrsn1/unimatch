@@ -69,7 +69,7 @@ python main_stereo.py \
 ```
 
 A ready-to-edit training launcher is provided at [scripts/gmstereo_scale2_cloud_stereo_train.sh](scripts/gmstereo_scale2_cloud_stereo_train.sh).
-For that launcher, place the pretrained starter checkpoint at `pretrained/gmflow-scale2-things-36579974.pth` (create the `pretrained/` folder at repo root if needed).
+
 
 
 
