@@ -12,7 +12,7 @@ from glob import glob
 
 from loss.stereo_metric import d1_metric, thres_metric
 from dataloader.stereo.datasets import (FlyingThings3D, KITTI15,
-                                        ETH3DStereo, MiddleburyEval3)
+                                        ETH3DStereo, MiddleburyEval3, CloudStereo)
 from dataloader.stereo import transforms
 from utils.utils import InputPadder
 
@@ -704,6 +704,98 @@ def validate_middlebury(model,
 
     results['middlebury_epe'] = mean_epe
     results['middlebury_2px'] = mean_thres2
+
+    return results
+
+
+@torch.no_grad()
+def validate_cloudstereo(model,
+                         cloudstereo_root='datasets/cloud-stereo',
+                         cloudstereo_split_json=('val.json',),
+                         max_disp=400,
+                         padding_factor=16,
+                         inference_size=None,
+                         attn_type=None,
+                         attn_splits_list=None,
+                         corr_radius_list=None,
+                         prop_radius_list=None,
+                         num_reg_refine=1,
+                         ):
+    model.eval()
+    results = {}
+
+    val_transform_list = [transforms.ToTensor(),
+                          transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD)
+                          ]
+
+    val_transform = transforms.Compose(val_transform_list)
+
+    val_dataset = CloudStereo(data_dir=cloudstereo_root,
+                              split_files=cloudstereo_split_json,
+                              transform=val_transform)
+
+    num_samples = len(val_dataset)
+    print('=> %d samples found in the cloudstereo validation set' % num_samples)
+
+    val_epe = 0
+    val_d1 = 0
+    valid_samples = 0
+
+    for i, sample in enumerate(val_dataset):
+        if i % 100 == 0:
+            print('=> Validating %d/%d' % (i, num_samples))
+
+        left = sample['left'].to(device).unsqueeze(0)
+        right = sample['right'].to(device).unsqueeze(0)
+        gt_disp = sample['disp'].to(device)
+
+        if inference_size is None:
+            padder = InputPadder(left.shape, padding_factor=padding_factor)
+            left, right = padder.pad(left, right)
+        else:
+            ori_size = left.shape[-2:]
+            left = F.interpolate(left, size=inference_size, mode='bilinear',
+                                 align_corners=True)
+            right = F.interpolate(right, size=inference_size, mode='bilinear',
+                                  align_corners=True)
+
+        mask = (gt_disp > 0) & (gt_disp < max_disp)
+
+        if not mask.any():
+            continue
+
+        valid_samples += 1
+
+        pred_disp = model(left, right,
+                          attn_type=attn_type,
+                          attn_splits_list=attn_splits_list,
+                          corr_radius_list=corr_radius_list,
+                          prop_radius_list=prop_radius_list,
+                          num_reg_refine=num_reg_refine,
+                          task='stereo',
+                          )['flow_preds'][-1]
+
+        if inference_size is None:
+            pred_disp = padder.unpad(pred_disp)[0]
+        else:
+            pred_disp = F.interpolate(pred_disp.unsqueeze(1), size=ori_size, mode='bilinear',
+                                      align_corners=True).squeeze(1)[0]
+            pred_disp = pred_disp * ori_size[-1] / float(inference_size[-1])
+
+        epe = F.l1_loss(gt_disp[mask], pred_disp[mask], reduction='mean')
+        d1 = d1_metric(pred_disp, gt_disp, mask)
+
+        val_epe += epe.item()
+        val_d1 += d1.item()
+
+    mean_epe = val_epe / valid_samples
+    mean_d1 = val_d1 / valid_samples
+
+    print('Validation cloudstereo EPE: %.3f, D1: %.4f' % (
+        mean_epe, mean_d1))
+
+    results['cloudstereo_epe'] = mean_epe
+    results['cloudstereo_d1'] = mean_d1
 
     return results
 
