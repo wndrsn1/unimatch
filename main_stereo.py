@@ -17,6 +17,7 @@ from evaluate_stereo import (validate_things, validate_kitti15, validate_eth3d,
                              validate_middlebury, create_kitti_submission,
                              create_eth3d_submission,
                              create_middlebury_submission,
+                             validate_cloudstereo,
                              inference_stereo,
                              )
 from unimatch.unimatch import UniMatch
@@ -43,6 +44,8 @@ def get_args_parser():
                         help='root directory for Cloud Stereo dataset metadata and images')
     parser.add_argument('--cloudstereo_train_json', default=['train.json'], type=str, nargs='+',
                         help='Cloud Stereo metadata json file(s), relative to --cloudstereo_root when not absolute')
+    parser.add_argument('--cloudstereo_val_json', default=['val.json'], type=str, nargs='+',
+                        help='Cloud Stereo validation json file(s), relative to --cloudstereo_root when not absolute')
     parser.add_argument('--cloudstereo_repeat', default=1, type=int,
                         help='repeat factor for Cloud Stereo training set')
 
@@ -331,6 +334,23 @@ def main(args):
             if args.local_rank == 0:
                 val_results.update(results_dict)
 
+        if 'cloudstereo' in args.val_dataset:
+            results_dict = validate_cloudstereo(model_without_ddp,
+                                                cloudstereo_root=args.cloudstereo_root,
+                                                cloudstereo_split_json=args.cloudstereo_val_json,
+                                                max_disp=args.max_disp,
+                                                padding_factor=args.padding_factor,
+                                                inference_size=args.inference_size,
+                                                attn_type=args.attn_type,
+                                                attn_splits_list=args.attn_splits_list,
+                                                corr_radius_list=args.corr_radius_list,
+                                                prop_radius_list=args.prop_radius_list,
+                                                num_reg_refine=args.num_reg_refine,
+                                                )
+
+            if args.local_rank == 0:
+                val_results.update(results_dict)
+
         return
 
     if args.inference_dir or (args.inference_dir_left and args.inference_dir_right):
@@ -568,6 +588,23 @@ def main(args):
                     if args.local_rank == 0:
                         val_results.update(results_dict)
 
+                if 'cloudstereo' in args.val_dataset:
+                    results_dict = validate_cloudstereo(model_without_ddp,
+                                                        cloudstereo_root=args.cloudstereo_root,
+                                                        cloudstereo_split_json=args.cloudstereo_val_json,
+                                                        max_disp=args.max_disp,
+                                                        padding_factor=args.padding_factor,
+                                                        inference_size=args.inference_size,
+                                                        attn_type=args.attn_type,
+                                                        attn_splits_list=args.attn_splits_list,
+                                                        corr_radius_list=args.corr_radius_list,
+                                                        prop_radius_list=args.prop_radius_list,
+                                                        num_reg_refine=args.num_reg_refine,
+                                                        )
+
+                    if args.local_rank == 0:
+                        val_results.update(results_dict)
+
                 if args.local_rank == 0:
                     # save to tensorboard
                     for key in val_results:
@@ -584,6 +621,7 @@ def main(args):
                                    'kitti15_epe', 'kitti15_d1', 'kitti15_3px',
                                    'eth3d_epe', 'eth3d_1px',
                                    'middlebury_epe', 'middlebury_2px',
+                                   'cloudstereo_epe', 'cloudstereo_d1',
                                    ]
 
                         eval_metrics = []

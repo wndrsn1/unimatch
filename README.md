@@ -117,6 +117,8 @@ The datasets used to train and evaluate our models for all three tasks are given
 
 The evaluation scripts used to reproduce the numbers in our paper are given in [scripts/gmflow_evaluate.sh](scripts/gmflow_evaluate.sh), [scripts/gmstereo_evaluate.sh](scripts/gmstereo_evaluate.sh) and [scripts/gmdepth_evaluate.sh](scripts/gmdepth_evaluate.sh).
 
+For CloudStereo-only checkpoint evaluation (no training), see [scripts/gmstereo_cloudstereo_evaluate.sh](scripts/gmstereo_cloudstereo_evaluate.sh).
+
 For submission to KITTI, Sintel, Middlebury and ETH3D online test sets, you can run [scripts/gmflow_submission.sh](scripts/gmflow_submission.sh) and [scripts/gmstereo_submission.sh](scripts/gmstereo_submission.sh) to generate the prediction results. The results can be submitted directly.
 
 
@@ -173,7 +175,6 @@ Please consider citing [DepthSplat](https://arxiv.org/abs/2410.13862) if DepthSp
 ## Acknowledgements
 
 This project would not have been possible without relying on some awesome repos: [RAFT](https://github.com/princeton-vl/RAFT), [LoFTR](https://github.com/zju3dv/LoFTR), [DETR](https://github.com/facebookresearch/detr), [Swin](https://github.com/microsoft/Swin-Transformer), [mmdetection](https://github.com/open-mmlab/mmdetection) and [Detectron2](https://github.com/facebookresearch/detectron2/blob/main/projects/TridentNet/tridentnet/trident_conv.py). We thank the original authors for their excellent work.
-
 
 
 
