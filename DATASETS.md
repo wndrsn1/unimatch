@@ -51,6 +51,26 @@ ln -s $YOUR_DATASET_ROOT datasets
 
 Otherwise, you may need to change the corresponding paths in [dataloader/stereo/datasets.py](dataloader/flow/datasets.py).
 
+### Cloud Stereo metadata format
+
+You can also train stereo with `--stage cloud_stereo` using metadata JSON files (for example from [jacoblin/cloud-stereo](https://huggingface.co/datasets/jacoblin/cloud-stereo)).
+Each JSON file should include:
+
+- `h`: image height used for rendering
+- `frames`: list of entries with `left_image_path`, `right_image_path`, `disparity_path`
+
+Use CLI flags to point to your converted metadata files:
+
+```
+python main_stereo.py \
+  --stage cloud_stereo \
+  --cloudstereo_root datasets/cloud-stereo \
+  --cloudstereo_train_json train.json
+```
+
+A ready-to-edit training launcher is provided at [scripts/gmstereo_scale2_cloud_stereo_train.sh](scripts/gmstereo_scale2_cloud_stereo_train.sh).
+For that launcher, place the pretrained starter checkpoint at `pretrained/gmflow-scale2-things-36579974.pth` (create the `pretrained/` folder at repo root if needed).
+
 
 
 ## Depth Estimation

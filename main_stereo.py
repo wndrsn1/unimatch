@@ -39,6 +39,12 @@ def get_args_parser():
     parser.add_argument('--img_height', default=288, type=int)
     parser.add_argument('--img_width', default=512, type=int)
     parser.add_argument('--padding_factor', default=16, type=int)
+    parser.add_argument('--cloudstereo_root', default='datasets/cloud-stereo', type=str,
+                        help='root directory for Cloud Stereo dataset metadata and images')
+    parser.add_argument('--cloudstereo_train_json', default=['train.json'], type=str, nargs='+',
+                        help='Cloud Stereo metadata json file(s), relative to --cloudstereo_root when not absolute')
+    parser.add_argument('--cloudstereo_repeat', default=1, type=int,
+                        help='repeat factor for Cloud Stereo training set')
 
     # training
     parser.add_argument('--batch_size', default=64, type=int)
