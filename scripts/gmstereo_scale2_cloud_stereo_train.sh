@@ -6,12 +6,27 @@ NUM_GPUS=8
 DATA_ROOT=datasets/cloud-stereo
 TRAIN_JSONS=(train.json)
 CHECKPOINT_DIR=checkpoints_stereo/cloud-stereo-gmstereo-scale2
+<<<<<<< codex/retrain-gmstereo-scale2-sceneflow-model-cyi1y3
+PRETRAINED_DIR=pretrained
+PRETRAINED_CKPT=${PRETRAINED_DIR}/gmflow-scale2-things-36579974.pth
+
+if [ ! -f "${PRETRAINED_CKPT}" ]; then
+  echo "Missing pretrained checkpoint: ${PRETRAINED_CKPT}"
+  echo "Download it and place it at that path (or edit PRETRAINED_CKPT in this script)."
+  exit 1
+fi
+=======
+>>>>>>> master
 
 mkdir -p "${CHECKPOINT_DIR}" && \
 python -m torch.distributed.launch --nproc_per_node=${NUM_GPUS} --master_port=9989 main_stereo.py \
 --launcher pytorch \
 --checkpoint_dir "${CHECKPOINT_DIR}" \
+<<<<<<< codex/retrain-gmstereo-scale2-sceneflow-model-cyi1y3
+--resume "${PRETRAINED_CKPT}" \
+=======
 --resume pretrained/gmflow-scale2-things-36579974.pth \
+>>>>>>> master
 --no_resume_optimizer \
 --stage cloud_stereo \
 --cloudstereo_root "${DATA_ROOT}" \
