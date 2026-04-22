@@ -689,6 +689,25 @@ class CloudStereo(StereoDataset):
                     return meta_dict[key]
             return None
 
+        def focal_from_fov_x_y(fov_x_y_value, image_h_value):
+            if fov_x_y_value is None or image_h_value is None:
+                return None
+
+            # allow scalar or list/tuple like [fov_x, fov_y]
+            if isinstance(fov_x_y_value, (list, tuple)):
+                if len(fov_x_y_value) == 0:
+                    return None
+                fov_x_y_value = fov_x_y_value[0]
+
+            fov_degrees = float(fov_x_y_value)
+            image_h = float(image_h_value)
+            if fov_degrees <= 0 or image_h <= 0:
+                return None
+
+            fov_rads = np.deg2rad(fov_degrees)
+            focal_length = image_h / (2.0 * np.tan(fov_rads / 2.0))
+            return float(focal_length)
+
         for split_file in split_files:
             split_path = split_file if os.path.isabs(split_file) else os.path.join(data_dir, split_file)
 
@@ -708,6 +727,11 @@ class CloudStereo(StereoDataset):
                 sample['disp'] = os.path.join(split_root, frame['disparity_path'])
                 sample['focal_length_px'] = get_meta_value(
                     frame, metadata, ['focal_length_px', 'focal_px', 'fx'])
+                if sample['focal_length_px'] is None:
+                    sample['focal_length_px'] = focal_from_fov_x_y(
+                        get_meta_value(frame, metadata, ['fov_x_y']),
+                        get_meta_value(frame, metadata, ['h']),
+                    )
                 sample['baseline_m'] = get_meta_value(
                     frame, metadata, ['baseline_m', 'baseline'])
                 sample['camera_height_m'] = get_meta_value(

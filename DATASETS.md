@@ -62,6 +62,7 @@ Each JSON file should include:
   - `focal_length_px` (or `focal_px` / `fx`)
   - `baseline_m` (or `baseline`)
   - `camera_height_m` (or `camera_height`) for height RMSE
+  - If `focal_length_px` is not present, `fov_x_y` + `h` are also supported to derive focal length.
 
 Use CLI flags to point to your converted metadata files:
 
