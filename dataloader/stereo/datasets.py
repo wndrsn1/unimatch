@@ -706,9 +706,12 @@ class CloudStereo(StereoDataset):
                 sample['left'] = os.path.join(split_root, frame['left_image_path'])
                 sample['right'] = os.path.join(split_root, frame['right_image_path'])
                 sample['disp'] = os.path.join(split_root, frame['disparity_path'])
-                sample['focal_length_px'] = get_meta_value(frame, metadata, ['focal_length_px', 'focal_px', 'fx'])
-                sample['baseline_m'] = get_meta_value(frame, metadata, ['baseline_m', 'baseline'])
-                sample['camera_height_m'] = get_meta_value(frame, metadata, ['camera_height_m', 'camera_height'])
+                sample['focal_length_px'] = get_meta_value(
+                    frame, metadata, ['focal_length_px', 'focal_px', 'fx'])
+                sample['baseline_m'] = get_meta_value(
+                    frame, metadata, ['baseline_m', 'baseline'])
+                sample['camera_height_m'] = get_meta_value(
+                    frame, metadata, ['camera_height_m', 'camera_height'])
 
                 self.samples.append(sample)
 
