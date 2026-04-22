@@ -15,6 +15,62 @@ IMAGENET_MEAN = [0.485, 0.456, 0.406]
 IMAGENET_STD = [0.229, 0.224, 0.225]
 
 
+class StereoRectifier:
+    def __init__(self, calib_meta):
+        self.h = int(calib_meta['h'])
+        self.w = int(calib_meta['w'])
+        image_size = (self.w, self.h)
+
+        self.k_left = np.array(calib_meta['left_intrinsic'], dtype=np.float64)
+        self.k_right = np.array(calib_meta['right_intrinsic'], dtype=np.float64)
+        self.d_left = np.zeros((5, 1), dtype=np.float64)
+        self.d_right = np.zeros((5, 1), dtype=np.float64)
+
+        left_to_right = np.array(calib_meta['left_to_right_pose'], dtype=np.float64)
+        r = left_to_right[:3, :3]
+        t = left_to_right[:3, 3]
+
+        r1, r2, p1, p2, q, _, _ = cv2.stereoRectify(
+            cameraMatrix1=self.k_left,
+            distCoeffs1=self.d_left,
+            cameraMatrix2=self.k_right,
+            distCoeffs2=self.d_right,
+            imageSize=image_size,
+            R=r,
+            T=t,
+            flags=cv2.CALIB_ZERO_DISPARITY,
+            alpha=0
+        )
+
+        self.r1 = r1
+        self.r2 = r2
+        self.p1 = p1
+        self.p2 = p2
+        self.q = q
+
+        self.left_map1, self.left_map2 = cv2.initUndistortRectifyMap(
+            self.k_left, self.d_left, self.r1, self.p1, image_size, cv2.CV_32FC1
+        )
+        self.right_map1, self.right_map2 = cv2.initUndistortRectifyMap(
+            self.k_right, self.d_right, self.r2, self.p2, image_size, cv2.CV_32FC1
+        )
+
+        self.fx = float(self.p1[0, 0])
+        self.baseline = abs(float(-self.p2[0, 3] / self.p2[0, 0]))
+
+    def rectify_pair(self, left_rgb, right_rgb):
+        left_rect = cv2.remap(left_rgb, self.left_map1, self.left_map2, interpolation=cv2.INTER_LINEAR)
+        right_rect = cv2.remap(right_rgb, self.right_map1, self.right_map2, interpolation=cv2.INTER_LINEAR)
+        return left_rect, right_rect
+
+    def rectify_right_points(self, points_xy):
+        if len(points_xy) == 0:
+            return np.empty((0, 2), dtype=np.float32)
+        pts = np.asarray(points_xy, dtype=np.float32).reshape(-1, 1, 2)
+        pts_rect = cv2.undistortPoints(pts, self.k_right, self.d_right, R=self.r2, P=self.p2)
+        return pts_rect.reshape(-1, 2).astype(np.float32)
+
+
 class GMStereoPredictor:
     def __init__(self, ckpt_path, device='cuda',
                  num_scales=2, upsample_factor=4, reg_refine=False, num_reg_refine=1,
@@ -261,7 +317,8 @@ def main():
     parser.add_argument('--frame_start', default=80, type=int)
     parser.add_argument('--frame_end', default=100, type=int)
     parser.add_argument('--checkpoint', required=True, type=str)
-    parser.add_argument('--baseline_m', default=62.0, type=float)
+    parser.add_argument('--baseline_m', default=None, type=float,
+                        help='Optional override for baseline used in depth conversion; default from rectification')
     parser.add_argument('--device', default='cuda', type=str)
     args = parser.parse_args()
 
@@ -269,7 +326,10 @@ def main():
         meta = json.load(fp)
     right_intrinsic = np.array(meta["right_intrinsic"], dtype=np.float64)
     lidar_to_right = np.array(meta["lidar_to_right_cam"], dtype=np.float64)
-    fx = float(right_intrinsic[0, 0])
+    rectifier = StereoRectifier(meta)
+    fx = rectifier.fx
+    baseline_m = rectifier.baseline if args.baseline_m is None else float(args.baseline_m)
+    print(f"[Rectification] fx={fx:.4f}, baseline={baseline_m:.6f}")
 
     predictor = GMStereoPredictor(args.checkpoint, device=args.device)
     lidar_files = sorted(glob.glob(f"{args.file_dir}/lidar/{args.date}/{args.date}_{args.hour:0>2}*.hpl"))
@@ -279,8 +339,18 @@ def main():
         try:
             left_image, right_image = load_images(args.file_dir, args.date, args.hour, frame_idx, meta)
             lidar_points = lidar_data[frame_idx]
+            if len(lidar_points) > 0:
+                right_pts = [p["right_cam_xy"] for p in lidar_points if "right_cam_xy" in p]
+                rect_pts = rectifier.rectify_right_points(right_pts)
+                j = 0
+                for p in lidar_points:
+                    if "right_cam_xy" in p:
+                        p["right_cam_xy"] = rect_pts[j]
+                        j += 1
+
+            left_image, right_image = rectifier.rectify_pair(left_image, right_image)
             results, disparity_map = estimate_disparities_from_right_seed_points(
-                left_image, right_image, lidar_points, fx, args.baseline_m, predictor
+                left_image, right_image, lidar_points, fx, baseline_m, predictor
             )
             summary = summarize_results(results)
             print(f"frame {frame_idx}: lidar points={len(lidar_points)}, matched features={len(results)}")
