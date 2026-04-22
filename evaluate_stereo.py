@@ -11,8 +11,9 @@ from PIL import Image
 from glob import glob
 
 from loss.stereo_metric import d1_metric, thres_metric
+from loss.depth_loss import compute_errors
 from dataloader.stereo.datasets import (FlyingThings3D, KITTI15,
-                                        ETH3DStereo, MiddleburyEval3)
+                                        ETH3DStereo, MiddleburyEval3, CloudStereo)
 from dataloader.stereo import transforms
 from utils.utils import InputPadder
 
@@ -704,6 +705,179 @@ def validate_middlebury(model,
 
     results['middlebury_epe'] = mean_epe
     results['middlebury_2px'] = mean_thres2
+
+    return results
+
+
+@torch.no_grad()
+def validate_cloudstereo(model,
+                         cloudstereo_root='datasets/cloud-stereo',
+                         cloudstereo_split_json=('val.json',),
+                         max_disp=400,
+                         padding_factor=16,
+                         inference_size=None,
+                         attn_type=None,
+                         attn_splits_list=None,
+                         corr_radius_list=None,
+                         prop_radius_list=None,
+                         num_reg_refine=1,
+                         ):
+    model.eval()
+    results = {}
+
+    val_transform_list = [transforms.ToTensor(),
+                          transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD)
+                          ]
+
+    val_transform = transforms.Compose(val_transform_list)
+
+    val_dataset = CloudStereo(data_dir=cloudstereo_root,
+                              split_files=cloudstereo_split_json,
+                              transform=val_transform)
+
+    num_samples = len(val_dataset)
+    print('=> %d samples found in the cloudstereo validation set' % num_samples)
+
+    val_epe = 0
+    val_d1 = 0
+    abs_rel_list = []
+    sq_rel_list = []
+    rmse_list = []
+    rmse_log_list = []
+    a1_list = []
+    disp_rmse_list = []
+    depth_rmse_list = []
+    height_rmse_list = []
+    valid_samples = 0
+
+    for i, sample in enumerate(val_dataset):
+        if i % 100 == 0:
+            print('=> Validating %d/%d' % (i, num_samples))
+
+        left = sample['left'].to(device).unsqueeze(0)
+        right = sample['right'].to(device).unsqueeze(0)
+        gt_disp = sample['disp'].to(device)
+
+        if inference_size is None:
+            padder = InputPadder(left.shape, padding_factor=padding_factor)
+            left, right = padder.pad(left, right)
+        else:
+            ori_size = left.shape[-2:]
+            left = F.interpolate(left, size=inference_size, mode='bilinear',
+                                 align_corners=True)
+            right = F.interpolate(right, size=inference_size, mode='bilinear',
+                                  align_corners=True)
+
+        mask = (gt_disp > 0) & (gt_disp < max_disp)
+
+        if not mask.any():
+            continue
+
+        valid_samples += 1
+
+        pred_disp = model(left, right,
+                          attn_type=attn_type,
+                          attn_splits_list=attn_splits_list,
+                          corr_radius_list=corr_radius_list,
+                          prop_radius_list=prop_radius_list,
+                          num_reg_refine=num_reg_refine,
+                          task='stereo',
+                          )['flow_preds'][-1]
+
+        if inference_size is None:
+            pred_disp = padder.unpad(pred_disp)[0]
+        else:
+            pred_disp = F.interpolate(pred_disp.unsqueeze(1), size=ori_size, mode='bilinear',
+                                      align_corners=True).squeeze(1)[0]
+            pred_disp = pred_disp * ori_size[-1] / float(inference_size[-1])
+
+        epe = F.l1_loss(gt_disp[mask], pred_disp[mask], reduction='mean')
+        d1 = d1_metric(pred_disp, gt_disp, mask)
+
+        gt_valid = gt_disp[mask].detach().cpu().numpy().astype(np.float64)
+        pred_valid = pred_disp[mask].detach().cpu().numpy().astype(np.float64)
+
+        # avoid divide-by-zero / log invalid values in depth-style metrics
+        gt_valid = np.clip(gt_valid, 1e-6, None)
+        pred_valid = np.clip(pred_valid, 1e-6, None)
+
+        abs_rel, sq_rel, rmse, rmse_log, a1, _, _ = compute_errors(gt_valid, pred_valid)
+        disp_rmse = float(np.sqrt(np.mean((gt_valid - pred_valid) ** 2)))
+
+        sample_index = sample.get('sample_index', i)
+        sample_meta = val_dataset.samples[sample_index]
+        focal_length_px = sample_meta.get('focal_length_px')
+        baseline_m = sample_meta.get('baseline_m')
+        camera_height_m = sample_meta.get('camera_height_m')
+
+        depth_rmse = None
+        height_rmse = None
+        if focal_length_px is not None and baseline_m is not None:
+            focal_length_px = float(focal_length_px)
+            baseline_m = float(baseline_m)
+            depth_scale = focal_length_px * baseline_m
+
+            gt_depth = depth_scale / gt_valid
+            pred_depth = depth_scale / pred_valid
+            depth_rmse = float(np.sqrt(np.mean((gt_depth - pred_depth) ** 2)))
+
+            if camera_height_m is not None:
+                camera_height_m = float(camera_height_m)
+                gt_height = camera_height_m - gt_depth
+                pred_height = camera_height_m - pred_depth
+                height_rmse = float(np.sqrt(np.mean((gt_height - pred_height) ** 2)))
+
+        val_epe += epe.item()
+        val_d1 += d1.item()
+        abs_rel_list.append(abs_rel)
+        sq_rel_list.append(sq_rel)
+        rmse_list.append(rmse)
+        rmse_log_list.append(rmse_log)
+        a1_list.append(a1)
+        disp_rmse_list.append(disp_rmse)
+        if depth_rmse is not None:
+            depth_rmse_list.append(depth_rmse)
+        if height_rmse is not None:
+            height_rmse_list.append(height_rmse)
+
+    mean_epe = val_epe / valid_samples
+    mean_d1 = val_d1 / valid_samples
+    median_abs_rel = float(np.median(abs_rel_list))
+    median_sq_rel = float(np.median(sq_rel_list))
+    median_rmse = float(np.median(rmse_list))
+    median_rmse_log = float(np.median(rmse_log_list))
+    mean_a1 = float(np.mean(a1_list))
+
+    print('Validation cloudstereo EPE: %.3f, D1: %.4f' % (
+        mean_epe, mean_d1))
+    print('Validation cloudstereo depth-style metrics (per-sample aggregation): '
+          'Abs Rel(med): %.4f, Sq Rel(med): %.4f, RMSE(med): %.4f, '
+          'RMSE log(med): %.4f, delta<1.25(mean): %.4f' % (
+              median_abs_rel, median_sq_rel, median_rmse, median_rmse_log, mean_a1))
+    print('Validation cloudstereo disparity RMSE (mean): %.4f' % float(np.mean(disp_rmse_list)))
+
+    if len(depth_rmse_list) > 0:
+        print('Validation cloudstereo depth RMSE (mean): %.4f' % float(np.mean(depth_rmse_list)))
+    else:
+        print('Validation cloudstereo depth RMSE skipped: missing focal_length_px/baseline_m in metadata')
+
+    if len(height_rmse_list) > 0:
+        print('Validation cloudstereo height RMSE (mean): %.4f' % float(np.mean(height_rmse_list)))
+    else:
+        print('Validation cloudstereo height RMSE skipped: missing camera_height_m in metadata')
+
+    results['cloudstereo_epe'] = mean_epe
+    results['cloudstereo_d1'] = mean_d1
+    results['cloudstereo_abs_rel_med'] = median_abs_rel
+    results['cloudstereo_sq_rel_med'] = median_sq_rel
+    results['cloudstereo_rmse_med'] = median_rmse
+    results['cloudstereo_rmse_log_med'] = median_rmse_log
+    results['cloudstereo_delta1_mean'] = mean_a1
+    results['cloudstereo_disp_rmse_mean'] = float(np.mean(disp_rmse_list))
+    if len(depth_rmse_list) > 0:
+        results['cloudstereo_depth_rmse_mean'] = float(np.mean(depth_rmse_list))
+    if len(height_rmse_list) > 0:
+        results['cloudstereo_height_rmse_mean'] = float(np.mean(height_rmse_list))
 
     return results
 
