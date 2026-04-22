@@ -25,6 +25,8 @@ class StereoDataset(Dataset):
                  is_fallingthings=False,
                  is_raw_disp_png=False,
                  half_resolution=False,
+                 ignore_io_errors=False,
+                 max_read_retries=10,
                  ):
 
         super(StereoDataset, self).__init__()
@@ -41,46 +43,75 @@ class StereoDataset(Dataset):
         self.is_fallingthings = is_fallingthings
         self.half_resolution = half_resolution
         self.is_raw_disp_png = is_raw_disp_png
+        self.ignore_io_errors = ignore_io_errors
+        self.max_read_retries = max(1, int(max_read_retries))
+        self._io_error_count = 0
 
         self.samples = []
 
     def __getitem__(self, index):
-        sample = {}
+        current_index = index
 
-        # file path
-        sample_path = self.samples[index]
+        for retry in range(self.max_read_retries):
+            sample = {}
 
-        if self.save_filename:
-            sample['left_name'] = sample_path['left_name']
+            # file path
+            sample_path = self.samples[current_index]
 
-        sample['left'] = read_img(sample_path['left'])  # [H, W, 3]
-        sample['right'] = read_img(sample_path['right'])
+            try:
+                sample['sample_index'] = current_index
 
-        if 'disp' in sample_path and sample_path['disp'] is not None:
-            sample['disp'] = read_disp(sample_path['disp'],
-                                       vkitti2=self.is_vkitti2,
-                                       sintel=self.is_sintel,
-                                       tartanair=self.is_tartanair,
-                                       instereo2k=self.is_instereo2k,
-                                       fallingthings=self.is_fallingthings,
-                                       crestereo=self.is_crestereo,
-                                       raw_disp_png=self.is_raw_disp_png,
-                                       )  # [H, W]
+                if self.save_filename:
+                    sample['left_name'] = sample_path['left_name']
 
-            # for middlebury and eth3d datasets, invalid is denoted as inf
-            if self.is_middlebury_eth3d or self.is_crestereo:
-                sample['disp'][sample['disp'] == np.inf] = 0
+                sample['left'] = read_img(sample_path['left'])  # [H, W, 3]
+                sample['right'] = read_img(sample_path['right'])
 
-        if self.half_resolution:
-            sample['left'] = cv2.resize(sample['left'], None, fx=0.5, fy=0.5, interpolation=cv2.INTER_LINEAR)
-            sample['right'] = cv2.resize(sample['right'], None, fx=0.5, fy=0.5, interpolation=cv2.INTER_LINEAR)
+                if 'disp' in sample_path and sample_path['disp'] is not None:
+                    sample['disp'] = read_disp(sample_path['disp'],
+                                               vkitti2=self.is_vkitti2,
+                                               sintel=self.is_sintel,
+                                               tartanair=self.is_tartanair,
+                                               instereo2k=self.is_instereo2k,
+                                               fallingthings=self.is_fallingthings,
+                                               crestereo=self.is_crestereo,
+                                               raw_disp_png=self.is_raw_disp_png,
+                                               )  # [H, W]
 
-            sample['disp'] = cv2.resize(sample['disp'], None, fx=0.5, fy=0.5, interpolation=cv2.INTER_LINEAR) * 0.5
+                    # for middlebury and eth3d datasets, invalid is denoted as inf
+                    if self.is_middlebury_eth3d or self.is_crestereo:
+                        sample['disp'][sample['disp'] == np.inf] = 0
 
-        if self.transform is not None:
-            sample = self.transform(sample)
+                if self.half_resolution:
+                    sample['left'] = cv2.resize(sample['left'], None, fx=0.5, fy=0.5, interpolation=cv2.INTER_LINEAR)
+                    sample['right'] = cv2.resize(sample['right'], None, fx=0.5, fy=0.5, interpolation=cv2.INTER_LINEAR)
 
-        return sample
+                    sample['disp'] = cv2.resize(sample['disp'], None, fx=0.5, fy=0.5, interpolation=cv2.INTER_LINEAR) * 0.5
+
+                if self.transform is not None:
+                    sample = self.transform(sample)
+
+                return sample
+            except (FileNotFoundError, OSError) as exc:
+                if not self.ignore_io_errors:
+                    raise
+
+                self._io_error_count += 1
+                if self._io_error_count <= 20 or self._io_error_count % 100 == 0:
+                    print('[WARN] Skip unreadable sample in %s (error #%d): left=%s right=%s disp=%s; reason=%s' % (
+                        self.__class__.__name__,
+                        self._io_error_count,
+                        sample_path.get('left'),
+                        sample_path.get('right'),
+                        sample_path.get('disp'),
+                        str(exc),
+                    ))
+
+                # retry from another random index
+                current_index = np.random.randint(0, len(self.samples))
+
+        raise RuntimeError('Failed to load a valid sample after %d retries in %s' % (
+            self.max_read_retries, self.__class__.__name__))
 
     def __len__(self):
         return len(self.samples)
@@ -639,11 +670,24 @@ class CloudStereo(StereoDataset):
                  data_dir='datasets/cloud-stereo',
                  split_files=('train.json',),
                  transform=None,
+                 ignore_io_errors=True,
+                 max_read_retries=20,
                  ):
-        super(CloudStereo, self).__init__(transform=transform, is_raw_disp_png=True)
+        super(CloudStereo, self).__init__(transform=transform,
+                                          is_raw_disp_png=True,
+                                          ignore_io_errors=ignore_io_errors,
+                                          max_read_retries=max_read_retries)
 
         if isinstance(split_files, str):
             split_files = [split_files]
+
+        def get_meta_value(frame_dict, meta_dict, keys):
+            for key in keys:
+                if key in frame_dict and frame_dict[key] is not None:
+                    return frame_dict[key]
+                if key in meta_dict and meta_dict[key] is not None:
+                    return meta_dict[key]
+            return None
 
         for split_file in split_files:
             split_path = split_file if os.path.isabs(split_file) else os.path.join(data_dir, split_file)
@@ -662,6 +706,12 @@ class CloudStereo(StereoDataset):
                 sample['left'] = os.path.join(split_root, frame['left_image_path'])
                 sample['right'] = os.path.join(split_root, frame['right_image_path'])
                 sample['disp'] = os.path.join(split_root, frame['disparity_path'])
+                sample['focal_length_px'] = get_meta_value(
+                    frame, metadata, ['focal_length_px', 'focal_px', 'fx'])
+                sample['baseline_m'] = get_meta_value(
+                    frame, metadata, ['baseline_m', 'baseline'])
+                sample['camera_height_m'] = get_meta_value(
+                    frame, metadata, ['camera_height_m', 'camera_height'])
 
                 self.samples.append(sample)
 

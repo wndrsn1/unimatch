@@ -58,6 +58,10 @@ Each JSON file should include:
 
 - `h`: image height used for rendering
 - `frames`: list of entries with `left_image_path`, `right_image_path`, `disparity_path`
+- Optional (global or per-frame) calibration fields for metric-depth evaluation:
+  - `focal_length_px` (or `focal_px` / `fx`)
+  - `baseline_m` (or `baseline`)
+  - `camera_height_m` (or `camera_height`) for height RMSE
 
 Use CLI flags to point to your converted metadata files:
 
