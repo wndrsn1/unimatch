@@ -745,6 +745,9 @@ def validate_cloudstereo(model,
     rmse_list = []
     rmse_log_list = []
     a1_list = []
+    disp_rmse_list = []
+    depth_rmse_list = []
+    height_rmse_list = []
     valid_samples = 0
 
     for i, sample in enumerate(val_dataset):
@@ -799,6 +802,30 @@ def validate_cloudstereo(model,
         pred_valid = np.clip(pred_valid, 1e-6, None)
 
         abs_rel, sq_rel, rmse, rmse_log, a1, _, _ = compute_errors(gt_valid, pred_valid)
+        disp_rmse = float(np.sqrt(np.mean((gt_valid - pred_valid) ** 2)))
+
+        sample_index = sample.get('sample_index', i)
+        sample_meta = val_dataset.samples[sample_index]
+        focal_length_px = sample_meta.get('focal_length_px')
+        baseline_m = sample_meta.get('baseline_m')
+        camera_height_m = sample_meta.get('camera_height_m')
+
+        depth_rmse = None
+        height_rmse = None
+        if focal_length_px is not None and baseline_m is not None:
+            focal_length_px = float(focal_length_px)
+            baseline_m = float(baseline_m)
+            depth_scale = focal_length_px * baseline_m
+
+            gt_depth = depth_scale / gt_valid
+            pred_depth = depth_scale / pred_valid
+            depth_rmse = float(np.sqrt(np.mean((gt_depth - pred_depth) ** 2)))
+
+            if camera_height_m is not None:
+                camera_height_m = float(camera_height_m)
+                gt_height = camera_height_m - gt_depth
+                pred_height = camera_height_m - pred_depth
+                height_rmse = float(np.sqrt(np.mean((gt_height - pred_height) ** 2)))
 
         val_epe += epe.item()
         val_d1 += d1.item()
@@ -807,6 +834,11 @@ def validate_cloudstereo(model,
         rmse_list.append(rmse)
         rmse_log_list.append(rmse_log)
         a1_list.append(a1)
+        disp_rmse_list.append(disp_rmse)
+        if depth_rmse is not None:
+            depth_rmse_list.append(depth_rmse)
+        if height_rmse is not None:
+            height_rmse_list.append(height_rmse)
 
     mean_epe = val_epe / valid_samples
     mean_d1 = val_d1 / valid_samples
@@ -822,6 +854,17 @@ def validate_cloudstereo(model,
           'Abs Rel(med): %.4f, Sq Rel(med): %.4f, RMSE(med): %.4f, '
           'RMSE log(med): %.4f, delta<1.25(mean): %.4f' % (
               median_abs_rel, median_sq_rel, median_rmse, median_rmse_log, mean_a1))
+    print('Validation cloudstereo disparity RMSE (mean): %.4f' % float(np.mean(disp_rmse_list)))
+
+    if len(depth_rmse_list) > 0:
+        print('Validation cloudstereo depth RMSE (mean): %.4f' % float(np.mean(depth_rmse_list)))
+    else:
+        print('Validation cloudstereo depth RMSE skipped: missing focal_length_px/baseline_m in metadata')
+
+    if len(height_rmse_list) > 0:
+        print('Validation cloudstereo height RMSE (mean): %.4f' % float(np.mean(height_rmse_list)))
+    else:
+        print('Validation cloudstereo height RMSE skipped: missing camera_height_m in metadata')
 
     results['cloudstereo_epe'] = mean_epe
     results['cloudstereo_d1'] = mean_d1
@@ -830,6 +873,11 @@ def validate_cloudstereo(model,
     results['cloudstereo_rmse_med'] = median_rmse
     results['cloudstereo_rmse_log_med'] = median_rmse_log
     results['cloudstereo_delta1_mean'] = mean_a1
+    results['cloudstereo_disp_rmse_mean'] = float(np.mean(disp_rmse_list))
+    if len(depth_rmse_list) > 0:
+        results['cloudstereo_depth_rmse_mean'] = float(np.mean(depth_rmse_list))
+    if len(height_rmse_list) > 0:
+        results['cloudstereo_height_rmse_mean'] = float(np.mean(height_rmse_list))
 
     return results
 

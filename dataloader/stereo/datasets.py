@@ -59,6 +59,8 @@ class StereoDataset(Dataset):
             sample_path = self.samples[current_index]
 
             try:
+                sample['sample_index'] = current_index
+
                 if self.save_filename:
                     sample['left_name'] = sample_path['left_name']
 
@@ -679,6 +681,14 @@ class CloudStereo(StereoDataset):
         if isinstance(split_files, str):
             split_files = [split_files]
 
+        def get_meta_value(frame_dict, meta_dict, keys):
+            for key in keys:
+                if key in frame_dict and frame_dict[key] is not None:
+                    return frame_dict[key]
+                if key in meta_dict and meta_dict[key] is not None:
+                    return meta_dict[key]
+            return None
+
         for split_file in split_files:
             split_path = split_file if os.path.isabs(split_file) else os.path.join(data_dir, split_file)
 
@@ -696,6 +706,9 @@ class CloudStereo(StereoDataset):
                 sample['left'] = os.path.join(split_root, frame['left_image_path'])
                 sample['right'] = os.path.join(split_root, frame['right_image_path'])
                 sample['disp'] = os.path.join(split_root, frame['disparity_path'])
+                sample['focal_length_px'] = get_meta_value(frame, metadata, ['focal_length_px', 'focal_px', 'fx'])
+                sample['baseline_m'] = get_meta_value(frame, metadata, ['baseline_m', 'baseline'])
+                sample['camera_height_m'] = get_meta_value(frame, metadata, ['camera_height_m', 'camera_height'])
 
                 self.samples.append(sample)
 
