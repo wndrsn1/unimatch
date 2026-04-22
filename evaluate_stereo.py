@@ -11,6 +11,7 @@ from PIL import Image
 from glob import glob
 
 from loss.stereo_metric import d1_metric, thres_metric
+from loss.depth_loss import compute_errors
 from dataloader.stereo.datasets import (FlyingThings3D, KITTI15,
                                         ETH3DStereo, MiddleburyEval3, CloudStereo)
 from dataloader.stereo import transforms
@@ -739,6 +740,11 @@ def validate_cloudstereo(model,
 
     val_epe = 0
     val_d1 = 0
+    abs_rel_list = []
+    sq_rel_list = []
+    rmse_list = []
+    rmse_log_list = []
+    a1_list = []
     valid_samples = 0
 
     for i, sample in enumerate(val_dataset):
@@ -785,17 +791,45 @@ def validate_cloudstereo(model,
         epe = F.l1_loss(gt_disp[mask], pred_disp[mask], reduction='mean')
         d1 = d1_metric(pred_disp, gt_disp, mask)
 
+        gt_valid = gt_disp[mask].detach().cpu().numpy().astype(np.float64)
+        pred_valid = pred_disp[mask].detach().cpu().numpy().astype(np.float64)
+
+        # avoid divide-by-zero / log invalid values in depth-style metrics
+        gt_valid = np.clip(gt_valid, 1e-6, None)
+        pred_valid = np.clip(pred_valid, 1e-6, None)
+
+        abs_rel, sq_rel, rmse, rmse_log, a1, _, _ = compute_errors(gt_valid, pred_valid)
+
         val_epe += epe.item()
         val_d1 += d1.item()
+        abs_rel_list.append(abs_rel)
+        sq_rel_list.append(sq_rel)
+        rmse_list.append(rmse)
+        rmse_log_list.append(rmse_log)
+        a1_list.append(a1)
 
     mean_epe = val_epe / valid_samples
     mean_d1 = val_d1 / valid_samples
+    median_abs_rel = float(np.median(abs_rel_list))
+    median_sq_rel = float(np.median(sq_rel_list))
+    median_rmse = float(np.median(rmse_list))
+    median_rmse_log = float(np.median(rmse_log_list))
+    mean_a1 = float(np.mean(a1_list))
 
     print('Validation cloudstereo EPE: %.3f, D1: %.4f' % (
         mean_epe, mean_d1))
+    print('Validation cloudstereo depth-style metrics (per-sample aggregation): '
+          'Abs Rel(med): %.4f, Sq Rel(med): %.4f, RMSE(med): %.4f, '
+          'RMSE log(med): %.4f, delta<1.25(mean): %.4f' % (
+              median_abs_rel, median_sq_rel, median_rmse, median_rmse_log, mean_a1))
 
     results['cloudstereo_epe'] = mean_epe
     results['cloudstereo_d1'] = mean_d1
+    results['cloudstereo_abs_rel_med'] = median_abs_rel
+    results['cloudstereo_sq_rel_med'] = median_sq_rel
+    results['cloudstereo_rmse_med'] = median_rmse
+    results['cloudstereo_rmse_log_med'] = median_rmse_log
+    results['cloudstereo_delta1_mean'] = mean_a1
 
     return results
 

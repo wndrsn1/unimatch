@@ -622,6 +622,9 @@ def main(args):
                                    'eth3d_epe', 'eth3d_1px',
                                    'middlebury_epe', 'middlebury_2px',
                                    'cloudstereo_epe', 'cloudstereo_d1',
+                                   'cloudstereo_abs_rel_med', 'cloudstereo_sq_rel_med',
+                                   'cloudstereo_rmse_med', 'cloudstereo_rmse_log_med',
+                                   'cloudstereo_delta1_mean',
                                    ]
 
                         eval_metrics = []
