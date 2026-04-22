@@ -627,7 +627,7 @@ def main(args):
                                    'cloudstereo_delta1_mean',
                                    'cloudstereo_disp_rmse_mean',
                                    'cloudstereo_depth_rmse_mean',
-                                   'cloudstereo_height_rmse_mean',
+                                   'cloudstereo_height_rmse_med',
                                    ]
 
                         eval_metrics = []

@@ -862,7 +862,7 @@ def validate_cloudstereo(model,
         print('Validation cloudstereo depth RMSE skipped: missing focal_length_px/baseline_m in metadata')
 
     if len(height_rmse_list) > 0:
-        print('Validation cloudstereo height RMSE (mean): %.4f' % float(np.mean(height_rmse_list)))
+        print('Validation cloudstereo height RMSE (med): %.4f' % float(np.median(height_rmse_list)))
     else:
         print('Validation cloudstereo height RMSE skipped: missing camera_height_m in metadata')
 
@@ -877,7 +877,7 @@ def validate_cloudstereo(model,
     if len(depth_rmse_list) > 0:
         results['cloudstereo_depth_rmse_mean'] = float(np.mean(depth_rmse_list))
     if len(height_rmse_list) > 0:
-        results['cloudstereo_height_rmse_mean'] = float(np.mean(height_rmse_list))
+        results['cloudstereo_height_rmse_med'] = float(np.median(height_rmse_list))
 
     return results
 
