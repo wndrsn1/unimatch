@@ -171,6 +171,54 @@ def _save_cloudstereo_eval_panel(left_tensor, right_tensor, pred_disp, gt_disp, 
     cv2.imwrite(str(out_file), panel)
 
 
+def _save_cloudstereo_eval_panel(left_tensor, right_tensor, pred_disp, gt_disp, out_file):
+    def tensor_to_rgb_uint8(img):
+        img = img.detach().cpu().permute(1, 2, 0).numpy()
+        img = (img * np.array(IMAGENET_STD)[None, None, :] + np.array(IMAGENET_MEAN)[None, None, :])
+        img = np.clip(img * 255.0, 0, 255).astype(np.uint8)
+        return img
+
+    def disp_to_color(disp):
+        disp = disp.astype(np.float32)
+        valid = disp > 0
+        if valid.any():
+            vmax = np.percentile(disp[valid], 99)
+            vmax = max(vmax, 1e-6)
+        else:
+            vmax = 1.0
+        norm = np.clip(disp / vmax, 0, 1)
+        color = cv2.applyColorMap((norm * 255).astype(np.uint8), cv2.COLORMAP_TURBO)
+        return color
+
+    def err_to_color(err):
+        err = err.astype(np.float32)
+        vmax = max(np.percentile(err, 99), 1e-6)
+        norm = np.clip(err / vmax, 0, 1)
+        color = cv2.applyColorMap((norm * 255).astype(np.uint8), cv2.COLORMAP_MAGMA)
+        return color
+
+    left_rgb = tensor_to_rgb_uint8(left_tensor)
+    right_rgb = tensor_to_rgb_uint8(right_tensor)
+
+    pred_np = pred_disp.astype(np.float32)
+    gt_np = gt_disp.astype(np.float32)
+    err_np = np.abs(pred_np - gt_np)
+
+    pred_vis = disp_to_color(pred_np)
+    gt_vis = disp_to_color(gt_np)
+    err_vis = err_to_color(err_np)
+
+    # cv2 colormap outputs BGR, convert images to BGR for concatenation consistency
+    left_bgr = cv2.cvtColor(left_rgb, cv2.COLOR_RGB2BGR)
+    right_bgr = cv2.cvtColor(right_rgb, cv2.COLOR_RGB2BGR)
+
+    panel = np.concatenate([left_bgr, right_bgr, pred_vis, gt_vis, err_vis], axis=1)
+
+    out_file = Path(out_file)
+    out_file.parent.mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(out_file), panel)
+
+
 @torch.no_grad()
 def create_kitti_submission(model,
                             output_path='output',

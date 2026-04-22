@@ -284,6 +284,8 @@ def estimate_disparities_from_right_seed_points(left_image, right_image, lidar_p
         disparity = d1
         pred_depth = fx * baseline_m / disparity
         results.append({
+            "right_xy": (xr, yr),
+            "left_xy": (float(xr + disparity), float(yr)),
             "disparity": float(disparity),
             "pred_depth": float(pred_depth),
             "gt_depth": float(gt_depth),
@@ -297,7 +299,51 @@ def summarize_results(results):
     gt = np.array([r["gt_depth"] for r in results], dtype=np.float32)
     pred = np.array([r["pred_depth"] for r in results], dtype=np.float32)
     err = pred - gt
-    return {"n": len(results), "rmse": float(np.sqrt(np.mean(err ** 2))), "mae": float(np.mean(np.abs(err))), "bias": float(np.mean(err))}
+    return {
+        "n": len(results),
+        "rmse": float(np.sqrt(np.mean(err ** 2))),
+        "mae": float(np.mean(np.abs(err))),
+        "bias": float(np.mean(err)),
+        "gt": gt,
+        "pred": pred,
+    }
+
+
+def plot_lidar_overlay_and_parity(left_image, right_image, lidar_points, results, summary, frame_idx):
+    plt.figure(figsize=(18, 6))
+
+    plt.subplot(1, 3, 1)
+    plt.imshow(left_image)
+    for r in results:
+        xl, yl = r["left_xy"]
+        plt.scatter([xl], [yl], c='yellow', s=16)
+    plt.title(f"Left image + projected points (frame {frame_idx})")
+    plt.axis("off")
+
+    plt.subplot(1, 3, 2)
+    plt.imshow(right_image)
+    for p in lidar_points:
+        if "right_cam_xy" in p:
+            x, y = p["right_cam_xy"]
+            plt.scatter([x], [y], c='cyan', s=12, marker='x')
+    for r in results:
+        xr, yr = r["right_xy"]
+        plt.scatter([xr], [yr], c='red', s=14)
+    plt.title("Right image + LiDAR seeds / matched features")
+    plt.axis("off")
+
+    plt.subplot(1, 3, 3)
+    plt.scatter(summary["gt"], summary["pred"], s=18)
+    mn = float(min(summary["gt"].min(), summary["pred"].min()))
+    mx = float(max(summary["gt"].max(), summary["pred"].max()))
+    plt.plot([mn, mx], [mn, mx], "r--")
+    plt.xlabel("Ground truth depth")
+    plt.ylabel("Predicted depth")
+    plt.title(f"Parity (RMSE={summary['rmse']:.2f}, n={summary['n']})")
+    plt.axis("equal")
+
+    plt.tight_layout()
+    plt.show()
 
 
 def plot_disparity(disparity_map, frame_idx):
@@ -356,6 +402,7 @@ def main():
             print(f"frame {frame_idx}: lidar points={len(lidar_points)}, matched features={len(results)}")
             if summary is not None:
                 print(f"RMSE={summary['rmse']:.3f} m, MAE={summary['mae']:.3f} m, Bias={summary['bias']:.3f} m")
+                plot_lidar_overlay_and_parity(left_image, right_image, lidar_points, results, summary, frame_idx)
             else:
                 print("No valid matches found.")
             plot_disparity(disparity_map, frame_idx)
