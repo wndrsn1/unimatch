@@ -9,6 +9,7 @@ import skimage.io
 import cv2
 from PIL import Image
 from glob import glob
+from pathlib import Path
 
 from loss.stereo_metric import d1_metric, thres_metric
 from loss.depth_loss import compute_errors
@@ -24,6 +25,54 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 IMAGENET_MEAN = [0.485, 0.456, 0.406]
 IMAGENET_STD = [0.229, 0.224, 0.225]
+
+
+def _save_cloudstereo_eval_panel(left_tensor, right_tensor, pred_disp, gt_disp, out_file):
+    def tensor_to_rgb_uint8(img):
+        img = img.detach().cpu().permute(1, 2, 0).numpy()
+        img = (img * np.array(IMAGENET_STD)[None, None, :] + np.array(IMAGENET_MEAN)[None, None, :])
+        img = np.clip(img * 255.0, 0, 255).astype(np.uint8)
+        return img
+
+    def disp_to_color(disp):
+        disp = disp.astype(np.float32)
+        valid = disp > 0
+        if valid.any():
+            vmax = np.percentile(disp[valid], 99)
+            vmax = max(vmax, 1e-6)
+        else:
+            vmax = 1.0
+        norm = np.clip(disp / vmax, 0, 1)
+        color = cv2.applyColorMap((norm * 255).astype(np.uint8), cv2.COLORMAP_TURBO)
+        return color
+
+    def err_to_color(err):
+        err = err.astype(np.float32)
+        vmax = max(np.percentile(err, 99), 1e-6)
+        norm = np.clip(err / vmax, 0, 1)
+        color = cv2.applyColorMap((norm * 255).astype(np.uint8), cv2.COLORMAP_MAGMA)
+        return color
+
+    left_rgb = tensor_to_rgb_uint8(left_tensor)
+    right_rgb = tensor_to_rgb_uint8(right_tensor)
+
+    pred_np = pred_disp.astype(np.float32)
+    gt_np = gt_disp.astype(np.float32)
+    err_np = np.abs(pred_np - gt_np)
+
+    pred_vis = disp_to_color(pred_np)
+    gt_vis = disp_to_color(gt_np)
+    err_vis = err_to_color(err_np)
+
+    # cv2 colormap outputs BGR, convert images to BGR for concatenation consistency
+    left_bgr = cv2.cvtColor(left_rgb, cv2.COLOR_RGB2BGR)
+    right_bgr = cv2.cvtColor(right_rgb, cv2.COLOR_RGB2BGR)
+
+    panel = np.concatenate([left_bgr, right_bgr, pred_vis, gt_vis, err_vis], axis=1)
+
+    out_file = Path(out_file)
+    out_file.parent.mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(out_file), panel)
 
 
 @torch.no_grad()
@@ -721,6 +770,8 @@ def validate_cloudstereo(model,
                          corr_radius_list=None,
                          prop_radius_list=None,
                          num_reg_refine=1,
+                         save_vis=False,
+                         save_dir='output/cloudstereo_eval',
                          ):
     model.eval()
     results = {}
@@ -757,6 +808,8 @@ def validate_cloudstereo(model,
         left = sample['left'].to(device).unsqueeze(0)
         right = sample['right'].to(device).unsqueeze(0)
         gt_disp = sample['disp'].to(device)
+        left_vis = sample['left']
+        right_vis = sample['right']
 
         if inference_size is None:
             padder = InputPadder(left.shape, padding_factor=padding_factor)
@@ -790,6 +843,15 @@ def validate_cloudstereo(model,
             pred_disp = F.interpolate(pred_disp.unsqueeze(1), size=ori_size, mode='bilinear',
                                       align_corners=True).squeeze(1)[0]
             pred_disp = pred_disp * ori_size[-1] / float(inference_size[-1])
+
+        if save_vis:
+            sample_index = sample.get('sample_index', i)
+            left_name = os.path.basename(val_dataset.samples[sample_index]['left'])
+            save_name = os.path.splitext(left_name)[0] + '_panel.png'
+            _save_cloudstereo_eval_panel(left_vis, right_vis,
+                                         pred_disp.detach().cpu().numpy(),
+                                         gt_disp.detach().cpu().numpy(),
+                                         os.path.join(save_dir, save_name))
 
         epe = F.l1_loss(gt_disp[mask], pred_disp[mask], reduction='mean')
         d1 = d1_metric(pred_disp, gt_disp, mask)

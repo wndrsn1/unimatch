@@ -346,6 +346,9 @@ def main(args):
                                                 corr_radius_list=args.corr_radius_list,
                                                 prop_radius_list=args.prop_radius_list,
                                                 num_reg_refine=args.num_reg_refine,
+                                                save_vis=args.save_vis_disp,
+                                                save_dir=args.save_dir if args.save_dir is not None else
+                                                os.path.join(args.output_path, 'cloudstereo_eval_panels'),
                                                 )
 
             if args.local_rank == 0:
@@ -600,6 +603,9 @@ def main(args):
                                                         corr_radius_list=args.corr_radius_list,
                                                         prop_radius_list=args.prop_radius_list,
                                                         num_reg_refine=args.num_reg_refine,
+                                                        save_vis=args.save_vis_disp,
+                                                        save_dir=args.save_dir if args.save_dir is not None else
+                                                        os.path.join(args.output_path, 'cloudstereo_eval_panels'),
                                                         )
 
                     if args.local_rank == 0:
