@@ -33,14 +33,21 @@ class GMStereoPredictor:
                               upsample_factor=upsample_factor,
                               reg_refine=reg_refine,
                               task='stereo').to(self.device)
-        ckpt = torch.load(ckpt_path, map_location=self.device)
-        self.model.load_state_dict(ckpt['model'], strict=False)
+        try:
+            ckpt = torch.load(ckpt_path, map_location=self.device, weights_only=True)
+        except TypeError:
+            ckpt = torch.load(ckpt_path, map_location=self.device)
+
+        state_dict = ckpt['model'] if isinstance(ckpt, dict) and 'model' in ckpt else ckpt
+        self.model.load_state_dict(state_dict, strict=False)
         self.model.eval()
 
     def _to_tensor(self, rgb):
         x = rgb.astype(np.float32) / 255.0
-        x = (x - np.array(IMAGENET_MEAN)[None, None, :]) / np.array(IMAGENET_STD)[None, None, :]
-        x = torch.from_numpy(np.transpose(x, (2, 0, 1))).unsqueeze(0).to(self.device)
+        mean = np.array(IMAGENET_MEAN, dtype=np.float32)[None, None, :]
+        std = np.array(IMAGENET_STD, dtype=np.float32)[None, None, :]
+        x = ((x - mean) / std).astype(np.float32)
+        x = torch.from_numpy(np.transpose(x, (2, 0, 1))).unsqueeze(0).to(self.device, dtype=torch.float32)
         return x
 
     @torch.no_grad()
