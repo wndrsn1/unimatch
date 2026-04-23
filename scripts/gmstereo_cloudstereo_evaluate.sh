@@ -18,3 +18,4 @@ CUDA_VISIBLE_DEVICES=0 python main_stereo.py \
 --upsample_factor 4 \
 --reg_refine \
 --num_reg_refine 3
+
