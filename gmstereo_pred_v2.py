@@ -1,0 +1,551 @@
+# %%
+import argparse
+import glob
+import json
+from collections import defaultdict
+
+import cv2
+import matplotlib.pyplot as plt
+import numpy as np
+import torch
+
+from unimatch.unimatch import UniMatch
+from utils.utils import InputPadder
+
+IMAGENET_MEAN = [0.485, 0.456, 0.406]
+IMAGENET_STD = [0.229, 0.224, 0.225]
+save_dir = 'output/clipped_preds'
+gt_min = 1000
+
+# %%
+class StereoRectifier:
+    def __init__(self, calib_meta):
+        self.h = int(calib_meta['h'])
+        self.w = int(calib_meta['w'])
+        image_size = (self.w, self.h)
+
+        self.k_left = np.array(calib_meta['left_intrinsic'], dtype=np.float64)
+        self.k_right = np.array(calib_meta['right_intrinsic'], dtype=np.float64)
+        self.d_left = np.zeros((5, 1), dtype=np.float64)
+        self.d_right = np.zeros((5, 1), dtype=np.float64)
+
+        left_to_right = np.array(calib_meta['left_to_right_pose'], dtype=np.float64)
+        r = left_to_right[:3, :3]
+        t = left_to_right[:3, 3]
+
+        r1, r2, p1, p2, q, _, _ = cv2.stereoRectify(
+            cameraMatrix1=self.k_left,
+            distCoeffs1=self.d_left,
+            cameraMatrix2=self.k_right,
+            distCoeffs2=self.d_right,
+            imageSize=image_size,
+            R=r,
+            T=t,
+            flags=cv2.CALIB_ZERO_DISPARITY,
+            alpha=0
+        )
+
+        self.r1 = r1
+        self.r2 = r2
+        self.p1 = p1
+        self.p2 = p2
+        self.q = q
+
+        self.left_map1, self.left_map2 = cv2.initUndistortRectifyMap(
+            self.k_left, self.d_left, self.r1, self.p1, image_size, cv2.CV_32FC1
+        )
+        self.right_map1, self.right_map2 = cv2.initUndistortRectifyMap(
+            self.k_right, self.d_right, self.r2, self.p2, image_size, cv2.CV_32FC1
+        )
+
+        self.fx = float(self.p1[0, 0])
+        self.baseline = abs(float(-self.p2[0, 3] / self.p2[0, 0]))
+
+    def rectify_pair(self, left_rgb, right_rgb):
+        left_rect = cv2.remap(left_rgb, self.left_map1, self.left_map2, interpolation=cv2.INTER_LINEAR)
+        right_rect = cv2.remap(right_rgb, self.right_map1, self.right_map2, interpolation=cv2.INTER_LINEAR)
+        return left_rect, right_rect
+
+    def rectify_right_points(self, points_xy):
+        if len(points_xy) == 0:
+            return np.empty((0, 2), dtype=np.float32)
+        pts = np.asarray(points_xy, dtype=np.float32).reshape(-1, 1, 2)
+        pts_rect = cv2.undistortPoints(pts, self.k_right, self.d_right, R=self.r2, P=self.p2)
+        return pts_rect.reshape(-1, 2).astype(np.float32)
+
+
+class GMStereoPredictor:
+    def __init__(self, ckpt_path, device='cuda',
+                 num_scales=2, upsample_factor=4, reg_refine=False, num_reg_refine=1,
+                 attn_type='self_swin2d_cross_1d',
+                 attn_splits_list=(2, 8), corr_radius_list=(-1, 4), prop_radius_list=(-1, 1),
+                 padding_factor=32):
+        self.device = torch.device(device if torch.cuda.is_available() else 'cpu')
+        self.padding_factor = padding_factor
+        self.attn_type = attn_type
+        self.attn_splits_list = list(attn_splits_list)
+        self.corr_radius_list = list(corr_radius_list)
+        self.prop_radius_list = list(prop_radius_list)
+        self.num_reg_refine = num_reg_refine
+
+        self.model = UniMatch(num_scales=num_scales,
+                              upsample_factor=upsample_factor,
+                              reg_refine=reg_refine,
+                              task='stereo').to(self.device)
+        try:
+            ckpt = torch.load(ckpt_path, map_location=self.device, weights_only=True)
+        except TypeError:
+            ckpt = torch.load(ckpt_path, map_location=self.device)
+
+        state_dict = ckpt['model'] if isinstance(ckpt, dict) and 'model' in ckpt else ckpt
+        self.model.load_state_dict(state_dict, strict=False)
+        self.model.eval()
+
+    def _to_tensor(self, rgb):
+        x = rgb.astype(np.float32) / 255.0
+        mean = np.array(IMAGENET_MEAN, dtype=np.float32)[None, None, :]
+        std = np.array(IMAGENET_STD, dtype=np.float32)[None, None, :]
+        x = ((x - mean) / std).astype(np.float32)
+        x = torch.from_numpy(np.transpose(x, (2, 0, 1))).unsqueeze(0).to(self.device, dtype=torch.float32)
+        return x
+
+    @torch.no_grad()
+    def predict(self, left_rgb, right_rgb):
+        left = self._to_tensor(left_rgb)
+        right = self._to_tensor(right_rgb)
+        padder = InputPadder(left.shape, padding_factor=self.padding_factor)
+        left, right = padder.pad(left, right)
+
+        pred = self.model(left, right,
+                          attn_type=self.attn_type,
+                          attn_splits_list=self.attn_splits_list,
+                          corr_radius_list=self.corr_radius_list,
+                          prop_radius_list=self.prop_radius_list,
+                          num_reg_refine=self.num_reg_refine,
+                          task='stereo')['flow_preds'][-1]
+        pred = padder.unpad(pred)[0].detach().cpu().numpy()
+        return pred
+
+
+class LidarData:
+    def __init__(self, data=None, data_locs=None, num_gates=0):
+        self.data = data
+        self.data_locs = data_locs
+        self.num_gates = num_gates
+
+    @classmethod
+    def fromfile(cls, filename):
+        with open(filename) as f:
+            header = [f.readline().split(':', maxsplit=1) for _ in range(17)]
+            num_gates = int(header[2][1].strip())
+            data = []
+            data_locs = []
+            while True:
+                line = f.readline()
+                if not line:
+                    break
+                parts = line.split()
+                if len(parts) == 0:
+                    break
+                data_locs.append(np.array(parts, dtype=float))
+                ray_data = np.array([f.readline().split() for _ in range(num_gates)], dtype=float)
+                data.append(ray_data)
+        return cls(data=np.array(data), data_locs=np.array(data_locs), num_gates=num_gates)
+
+    def getBackscatter(self):
+        return self.data[:, 20:, 2]
+
+
+def project_lidar_to_right(lidar_to_right_cam, right_intrinsic, azi, elev, depth):
+    azi = -azi + 270.0
+    x = depth * np.cos(np.deg2rad(elev)) * np.cos(np.deg2rad(azi))
+    z = depth * np.cos(np.deg2rad(elev)) * np.sin(np.deg2rad(azi))
+    y = -depth * np.sin(np.deg2rad(elev))
+    lidar_xyz = np.array([x, y, z, 1.0], dtype=np.float64)
+    cam_xyz = lidar_to_right_cam @ lidar_xyz
+    if cam_xyz[2] <= 0:
+        return None, None
+    proj = right_intrinsic @ (cam_xyz[:3] / cam_xyz[2])
+    return proj[:2], np.linalg.norm(cam_xyz[:3])
+
+
+def find_cloud_in_backscatter(backscatter, dist_thresh=120, smooth_window=9, sigma_thresh=2.0):
+    b = np.asarray(backscatter, dtype=np.float32)
+    if b.ndim != 1 or len(b) <= dist_thresh:
+        return None, None
+    k = np.ones(smooth_window, dtype=np.float32) / smooth_window
+    bs = np.convolve(b, k, mode="same")
+    search = bs[dist_thresh:]
+    thresh = np.median(search) + sigma_thresh * max(np.std(search), 1e-6)
+    idx = np.where(search > thresh)[0]
+    if len(idx) == 0:
+        return None, None
+    cloud_idx = int(idx[0] + dist_thresh)
+    cloud_depth = (cloud_idx + 20) * 3.0
+    return cloud_idx, cloud_depth
+
+
+def load_lidar_data_right(lidar_files, hour, lidar_to_right, right_intrinsic, max_frames=717):
+    decimal_time, azi, elev, backscatter = [], [], [], []
+    for lidar_file in lidar_files:
+        ld = LidarData.fromfile(lidar_file)
+        backscatter.extend(ld.getBackscatter())
+        decimal_time.extend(ld.data_locs[:, 0].tolist())
+        azi.extend(ld.data_locs[:, 1].tolist())
+        elev.extend(ld.data_locs[:, 2].tolist())
+    
+    decimal_time = np.array(decimal_time, dtype=np.float64)
+    azi = np.array(azi, dtype=np.float64)
+    elev = np.array(elev, dtype=np.float64)
+    # plto lidar profile 
+    # plt.figure(figsize=(10, 5))
+    # plt.plot(decimal_time, backscatter, '.', markersize=1)
+    # plt.xlabel("Decimal time (hours)")
+    # plt.ylabel("Backscatter")
+    # plt.title("LiDAR backscatter profile")
+    # plt.savefig(f"{save_dir}/lidar_backscatter_profile.png")
+    # plt.close()
+    lidar_output = defaultdict(list)
+    frame_times = hour + (10.0 + 5.0 * np.arange(max_frames)) / 3600.0
+    for frame_idx, camera_time in enumerate(frame_times):
+        idxs = np.where(np.abs(decimal_time - camera_time) < 2.5 / 3600.0)[0]
+        for i in idxs:
+            cloud_idx, cloud_depth = find_cloud_in_backscatter(backscatter[i])
+            if cloud_depth is None:
+                continue
+            uv_right, right_cam_depth = project_lidar_to_right(
+                lidar_to_right, right_intrinsic, azi[i], elev[i], cloud_depth
+            )
+            if uv_right is None:
+                continue
+            lidar_output[frame_idx].append({
+                "right_cam_depth": float(right_cam_depth),
+                "right_cam_xy": np.array(uv_right, dtype=np.float32),
+                "cloud_idx": int(cloud_idx),
+            })
+    return lidar_output
+
+
+def load_images(file_dir, date, hour, frame_idx, meta):
+    h, w = meta["h"], meta["w"]
+    left_video = cv2.VideoCapture(f"{file_dir}/left_images/{date}/{date}_{hour:0>2}.mp4")
+    right_video = cv2.VideoCapture(f"{file_dir}/right_images/{date}/{date}_{hour:0>2}.mp4")
+    left_video.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+    right_video.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+    okL, left_image = left_video.read()
+    okR, right_image = right_video.read()
+    left_video.release()
+    right_video.release()
+    if not okL or left_image is None or not okR or right_image is None:
+        raise RuntimeError(f"Failed to read frame {frame_idx}")
+    left_image = cv2.cvtColor(cv2.resize(left_image, (w, h)), cv2.COLOR_BGR2RGB)
+    right_image = cv2.cvtColor(cv2.resize(right_image, (w, h)), cv2.COLOR_BGR2RGB)
+    return left_image, right_image
+
+
+def bilinear_sample_scalar(img, x, y):
+    h, w = img.shape[:2]
+    if x < 0 or x >= w - 1 or y < 0 or y >= h - 1:
+        return None
+    x0, y0 = int(np.floor(x)), int(np.floor(y))
+    x1, y1 = x0 + 1, y0 + 1
+    dx, dy = x - x0, y - y0
+    v00, v10, v01, v11 = img[y0, x0], img[y0, x1], img[y1, x0], img[y1, x1]
+    return float(v00 * (1 - dx) * (1 - dy) + v10 * dx * (1 - dy) + v01 * (1 - dx) * dy + v11 * dx * dy)
+
+
+def pick_feature_near_lidar_point(image_gray, x, y, roi_half=15, max_corners=20):
+    h, w = image_gray.shape[:2]
+    x0, x1 = max(0, int(round(x)) - roi_half), min(w, int(round(x)) + roi_half + 1)
+    y0, y1 = max(0, int(round(y)) - roi_half), min(h, int(round(y)) + roi_half + 1)
+    if x1 <= x0 or y1 <= y0:
+        return None
+    roi = image_gray[y0:y1, x0:x1]
+    pts = cv2.goodFeaturesToTrack(roi, maxCorners=max_corners, qualityLevel=0.01, minDistance=3, blockSize=5)
+    if pts is None:
+        return None
+    pts = pts.reshape(-1, 2)
+    pts[:, 0] += x0
+    pts[:, 1] += y0
+    target = np.array([x, y], dtype=np.float32)
+    return pts[np.argmin(np.sum((pts - target[None, :]) ** 2, axis=1))]
+
+
+def estimate_disparities_from_right_seed_points(left_image, right_image, lidar_points, fx, baseline_m, predictor):
+    right_gray = cv2.cvtColor(right_image, cv2.COLOR_RGB2GRAY)
+    disparity_map = predictor.predict(left_image, right_image)
+    results = []
+    for p in lidar_points:
+        if "right_cam_xy" not in p:
+            continue
+        x_right_seed, y_right_seed = p["right_cam_xy"]
+        gt_depth = p["right_cam_depth"]
+        feat = pick_feature_near_lidar_point(right_gray, x_right_seed, y_right_seed, roi_half=15)
+        if feat is None:
+            continue
+        xr, yr = float(feat[0]), float(feat[1])
+        d0 = bilinear_sample_scalar(disparity_map, xr, yr)
+        if d0 is None or d0 <= 1:
+            continue
+        xl = xr + d0
+        d1 = bilinear_sample_scalar(disparity_map, xl, yr)
+        if d1 is None or d1 <= 1:
+            continue
+        disparity = d1
+        pred_depth = fx * baseline_m / disparity
+        results.append({
+            "right_xy": (xr, yr),
+            "left_xy": (float(xr + disparity), float(yr)),
+            "disparity": float(disparity),
+            "pred_depth": float(pred_depth),
+            "gt_depth": float(gt_depth),
+        })
+    return results, disparity_map
+
+def summarize_results(results):
+    if len(results) == 0:
+        return None
+    gt = np.array([r["gt_depth"] for r in results], dtype=np.float32)
+    pred = np.array([r["pred_depth"] for r in results], dtype=np.float32)
+    # remove data points < 1000 
+    valid_mask = gt >= gt_min
+    gt = gt[valid_mask]
+    pred = pred[valid_mask]
+    err = pred - gt
+
+    abs_rel = float(np.nanmedian(np.abs(err) / gt))
+    sq_rel = float(np.nanmedian((err ** 2) / gt))
+    rmse = float(np.sqrt(np.mean(err ** 2)))
+    per_sample_rmse = np.sqrt((err ** 2))
+    median_rmse = float(np.nanmedian(per_sample_rmse))
+    rmse_log = float(np.sqrt(np.nanmean((np.log(pred + 1e-6) - np.log(gt + 1e-6)) ** 2)))
+    pred_disp = np.array([r["disparity"] for r in results], dtype=np.float32)
+    return {
+        "n": len(results),
+        "rmse": rmse,
+        "median_rmse": median_rmse,
+        "mae": float(np.nanmean(np.abs(err))),
+        "bias": float(np.nanmean(err)),
+        "abs_rel": abs_rel,
+        "sq_rel": sq_rel,
+        "rmse_log": rmse_log,
+        "gt": gt,
+        "pred": pred,
+        "pred_disp": pred_disp,
+    }
+
+
+def plot_lidar_overlay_and_parity(left_image, right_image, lidar_points, results, summary, frame_idx, show_img=False):
+    plt.figure(figsize=(8, 18))
+
+    plt.subplot(3, 1, 1)
+    plt.imshow(left_image)
+    for r in results:
+        xl, yl = r["left_xy"]
+        plt.scatter([xl], [yl], c='yellow', s=16)
+    plt.title(f"Left image + projected points (frame {frame_idx})")
+    plt.axis("off")
+
+    plt.subplot(3, 1, 2)
+    plt.imshow(right_image)
+    for p in lidar_points:
+        if "right_cam_xy" in p:
+            x, y = p["right_cam_xy"]
+            plt.scatter([x], [y], c='cyan', s=12, marker='x')
+    for r in results:
+        xr, yr = r["right_xy"]
+        plt.scatter([xr], [yr], c='red', s=14)
+    plt.title("Right image + LiDAR seeds / matched features")
+    plt.axis("off")
+
+    plt.subplot(3, 1, 3)
+    plt.scatter(summary["gt"], summary["pred"], s=18)
+    mn = float(min(summary["gt"].min(), summary["pred"].min()))
+    mx = float(max(summary["gt"].max(), summary["pred"].max()))
+    plt.plot([mn, mx], [mn, mx], "r--")
+    plt.xlabel("Ground truth depth")
+    plt.ylabel("Predicted depth")
+    plt.title(f"Parity (RMSE={summary['rmse']:.2f}, n={summary['n']})")
+    plt.axis("equal")
+    plt.tight_layout()
+    plt.savefig(f"{save_dir}/frame_{frame_idx:0>3}_results.png")
+    if show_img: plt.show()
+    else: plt.close()
+
+def plot_disparity(left_image, right_image, disparity_map, frame_idx, show_img=False):
+    plt.figure(figsize=(12, 5))
+    plt.subplot(1, 3, 1)
+    plt.imshow(left_image)
+    plt.title(f"Left image (frame {frame_idx})")
+    plt.axis("off")
+    plt.subplot(1, 3, 2)
+    plt.imshow(right_image)
+    plt.title(f"Right image (frame {frame_idx})")
+    plt.axis("off")
+    plt.subplot(1, 3, 3)
+    plt.imshow(disparity_map, cmap="plasma")
+    plt.colorbar(label="Disparity (px)")
+    plt.title(f"GMStereo disparity map (frame {frame_idx})")
+    plt.axis("off")
+    plt.tight_layout()
+    plt.savefig(f"{save_dir}/frame_{frame_idx:0>3}_disparity_overview.png")
+    if show_img: plt.show()
+    else: plt.close()
+
+# %%
+from tqdm import tqdm
+def main():
+    file_dir = "/nfsscratch/wndrsn/cloud_stereo/lidar_dataset"
+    date = "2021-10-22"
+    hour = 12
+    frame_start = 80
+    frame_end = 200
+    checkpoint = "pretrained/step_095000.pth"
+    baseline_m = 62
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    with open(f"{file_dir}/calib.json", "r") as fp:
+        meta = json.load(fp)
+    right_intrinsic = np.array(meta["right_intrinsic"], dtype=np.float64)
+    lidar_to_right = np.array(meta["lidar_to_right_cam"], dtype=np.float64)
+    rectifier = StereoRectifier(meta)
+    fx = rectifier.fx
+    baseline_m = rectifier.baseline if baseline_m is None else float(baseline_m)
+    print(f"[Rectification] fx={fx:.4f}, baseline={baseline_m:.6f}")
+    print('loading model...')
+    predictor = GMStereoPredictor(checkpoint, device=device)
+    print('loaded model starting predictions...')
+    lidar_files = sorted(glob.glob(f"{file_dir}/lidar/{date}/{date}_{hour:0>2}*.hpl"))
+    lidar_data = load_lidar_data_right(lidar_files, hour, lidar_to_right, right_intrinsic)
+    num_frames = max(lidar_data.keys()) + 1 if len(lidar_data) > 0 else 0
+    rmses = []
+    summaries = []
+    num_fails=0
+    disparity_maps = []
+    # for frame_idx in tqdm(range(frame_start, frame_end)):
+    with tqdm(range(num_frames), desc="Processing frames") as pbar:
+        for frame_idx in pbar:
+            try:
+                left_image, right_image = load_images(file_dir, date, hour, frame_idx, meta)
+                lidar_points = lidar_data[frame_idx]
+                if len(lidar_points) > 0:
+                    right_pts = [p["right_cam_xy"] for p in lidar_points if "right_cam_xy" in p]
+                    rect_pts = rectifier.rectify_right_points(right_pts)
+                    j = 0
+                    for p in lidar_points:
+                        if "right_cam_xy" in p:
+                            p["right_cam_xy"] = rect_pts[j]
+                            j += 1
+
+                left_image, right_image = rectifier.rectify_pair(left_image, right_image)
+                results, disparity_map = estimate_disparities_from_right_seed_points(
+                    left_image, right_image, lidar_points, fx, baseline_m, predictor
+                )
+                summary = summarize_results(results)
+                disparity_maps.append([ left_image, right_image,disparity_map])
+                # print(f"frame {frame_idx}: lidar points={len(lidar_points)}, matched features={len(results)}")
+                if summary is not None:
+                    rmses.append(summary["median_rmse"])
+                    summaries.append(summary)
+                    avg_rmse = np.nanmean(rmses)
+                    pbar.set_postfix({"avg_rmse": f"{avg_rmse:.3f}","num_fails":num_fails})
+                    if frame_idx % 10 == 0:
+                        plot_lidar_overlay_and_parity(left_image, right_image, lidar_points, results, summary, frame_idx)
+                        plot_disparity(left_image, right_image, disparity_map, frame_idx)
+                else:
+                    num_fails+=1
+            except Exception as e:
+                print(f"Skipping frame {frame_idx}: {e}")
+    if len(rmses) > 0:
+        print(f"Average RMSE over {len(rmses)} frames: {np.nanmean(rmses):.3f} m")
+        valid_summaries = [s for s in summaries if s is not None and s["n"] > 0]
+        #output a json file w/ overall summaries 
+        overall_median_rmse = np.nanmean([s["median_rmse"] for s in valid_summaries])
+        overall_abs_rel = np.nanmean([s["abs_rel"] for s in valid_summaries])
+        overall_sq_rel = np.nanmean([s["sq_rel"] for s in valid_summaries])
+        overall_rmse_log = np.nanmean([s["rmse_log"] for s in valid_summaries])
+        overall_summary = {
+            "num_frames": len(summaries),
+            "num_valid_frames": len(valid_summaries),
+            "average_median_rmse": overall_median_rmse,
+            "average_abs_rel": overall_abs_rel,
+            "average_sq_rel": overall_sq_rel,
+            "average_rmse_log": overall_rmse_log,
+        }
+        with open(f"{save_dir}/overall_summary.json", "w") as fp:
+            json.dump(overall_summary, fp, indent=4)
+        plt.figure(figsize=(8, 5))
+        # plot histogram of per frame median rmse
+        plt.hist(rmses, bins=20, color='blue', alpha=0.7)
+        plt.xlabel("Median RMSE (m)")
+        plt.ylabel("Number of frames")
+        plt.title("Histogram of per-frame median RMSE")
+        plt.grid(True, which="both", ls="--", lw=0.5)
+        plt.savefig(f"{save_dir}/median_rmse_histogram.png")
+        plt.close()
+    return summaries
+
+summaries = main()
+
+# # %%
+# # report overall performance as average of per frame median
+# valid_summaries = [s for s in summaries if s is not None and s["n"] > 0]
+# if len(valid_summaries) > 0:
+#     overall_median_rmse = np.mean([s["median_rmse"] for s in valid_summaries])
+#     overall_abs_rel = np.mean([s["abs_rel"] for s in valid_summaries])
+#     overall_sq_rel = np.mean([s["sq_rel"] for s in valid_summaries])
+#     overall_rmse_log = np.mean([s["rmse_log"] for s in valid_summaries])
+#     print(f"Overall performance across {len(valid_summaries)} frames:")
+#     print(f"Average median RMSE: {overall_median_rmse:.3f} m")
+#     print(f"Average Abs Rel: {overall_abs_rel:.3f}")
+#     print(f"Average Sq Rel: {overall_sq_rel:.3f}")
+#     print(f"Average RMSE log: {overall_rmse_log:.3f}")
+#     # chart showing absolute error vs ground truth depth across all samples
+#     plt.figure(figsize=(8, 5))
+#     all_gt = np.concatenate([s["gt"] for s in valid_summaries])
+#     all_pred = np.concatenate([s["pred"] for s in valid_summaries])
+#     all_err = np.abs(all_pred - all_gt)
+#     plt.scatter(all_pred, all_err, s=10, alpha=0.5)
+#     plt.xlabel("Predicted depth (m)")
+#     plt.ylabel("Absolute error (m)")
+#     plt.title("Absolute error vs predicted depth")
+#     plt.grid(True, which="both", ls="--", lw=0.5)
+#     plt.savefig(f"{save_dir}/error_vs_depth.png")
+#     plt.show()
+#     #plot absolute error vs disparity 
+#     plt.figure(figsize=(8, 5))
+#     all_disp = np.concatenate([s["pred_disp"] for s in valid_summaries])
+#     plt.scatter(all_disp, all_err, s=10, alpha=0.5)
+#     plt.xlabel("Predicted disparity (px)")
+#     plt.ylabel("Absolute error (m)")
+#     plt.title("Absolute error vs predicted disparity")
+#     plt.savefig(f"{save_dir}/error_vs_disparity.png")
+#     plt.show()
+
+#     plt.figure(figsize=(8, 5))
+#     all_gt = np.concatenate([s["gt"] for s in valid_summaries])
+#     all_pred = np.concatenate([s["pred"] for s in valid_summaries])
+#     all_err = np.abs(all_pred - all_gt)
+#     plt.scatter(all_gt, all_err, s=10, alpha=0.5)
+#     plt.xlabel("True depth (m)")
+#     plt.ylabel("Absolute error (m)")
+#     plt.title("Absolute error vs True depth")
+#     plt.grid(True, which="both", ls="--", lw=0.5)
+#     plt.savefig(f"{save_dir}/true_error_vs_depth.png")
+#     plt.show()
+#     #parity plot 
+#     plt.figure(figsize=(8, 5))
+#     plt.scatter(all_gt, all_pred, s=10, alpha=0.5)
+#     mn = float(min(all_gt.min(), all_pred.min()))
+#     mx = float(max(all_gt.max(), all_pred.max()))
+#     # calc r2 value 
+#     r2 = np.corrcoef(all_gt, all_pred)[0, 1] ** 2
+#     plt.plot([mn, mx], [mn, mx], "r--", label=f"y=x (R²={r2:.3f})")
+#     plt.xlabel("Ground truth depth (m)")
+#     plt.ylabel("Predicted depth (m)")
+#     plt.title(f"Overall Parity (Avg median RMSE={overall_median_rmse:.3f} m)")
+#     plt.axis("equal")
+#     plt.grid(True, which="both", ls="--", lw=0.5)
+#     plt.savefig(f"{save_dir}/overall_parity.png")
+#     plt.show()
+
+
