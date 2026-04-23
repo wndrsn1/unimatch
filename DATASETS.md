@@ -75,6 +75,33 @@ python main_stereo.py \
 
 A ready-to-edit training launcher is provided at [scripts/gmstereo_scale2_cloud_stereo_train.sh](scripts/gmstereo_scale2_cloud_stereo_train.sh).
 
+#### Downloading from Hugging Face
+
+To prepare the [jacoblin/cloud-stereo](https://huggingface.co/datasets/jacoblin/cloud-stereo)
+dataset directly into a UniMatch-compatible layout:
+
+```bash
+pip install huggingface_hub
+python tools/prepare_cloudstereo_hf.py \
+  --repo_id jacoblin/cloud-stereo \
+  --output_dir datasets/cloud-stereo
+```
+
+This generates `train.json` and `val.json` under `datasets/cloud-stereo/` and
+creates a `datasets/cloud-stereo/data` symlink to the downloaded snapshot.
+
+#### Reproducing the BMVC 2025 Cloud-Stereo fine-tuning protocol
+
+The Cloud-Stereo paper reports gains from fine-tuning a learned stereo model on
+their synthetic split and evaluating on real-world data. In this repo, the
+closest protocol is:
+
+1) fine-tune GMStereo with `--stage cloud_stereo` using `train.json`, then  
+2) run `scripts/gmstereo_cloudstereo_evaluate.sh` with `--val_dataset cloudstereo`.
+
+A one-command launcher is available at
+[scripts/gmstereo_cloudstereo_reproduce_bmvc2025.sh](scripts/gmstereo_cloudstereo_reproduce_bmvc2025.sh).
+
 
 
 
